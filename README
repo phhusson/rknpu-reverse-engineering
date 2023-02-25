@@ -1,0 +1,110 @@
+== Context
+
+I have a H96Max rk3588 TV box, and I'd like to run some voice AI alogirthms on it (stt/tts), and Rockchip's SDK sucks. Really. It litterally knows only how to work on images. But still, most computer vision algorithms fail to apply for various reasons. This is a big endeavor, but I'll try to reverse engineer it, and plug it into some "proper" NPU framework (not sure which yet.), to have a usable NPU. Hopefully, I'll have managed this before CPUs become more powerful than that NPU...
+
+== 2023-02-24
+
+All (my?) reversing stories start with `strings`.
+Rockchip provides their binaries blobs at https://github.com/rockchip-linux/rknpu2/
+There are two files:
+4,7M    librknn_api/arm64-v8a/librknnrt.so
+832K    rknn_server/arm64/rknn_server
+
+Let's browse quickly `strings rknn_server/arm64/rknn_server |c++filt |less`
+- libusb stuff. It's probably for RK's USB NPUs
+- v4l stuff -- yeah great it's to plug into cameras, but not my concern ATM
+- Some mentions of /dev/dri, let's see what exists:
+card0 rockchip dev=display-subsystem unique=display-subsystem
+card1 rknpu dev=fdab0000.npu unique=fdab0000.npu
+render128 rockchip dev=display-subsystem unique=display-subsystem
+render129 rknpu dev=fdab0000.npu unique=fdab0000.npu
+
+Okay, so NPU is exposed as a DRM device. Let's grab some kernel source code.
+I took the first iI found on ddg, which is Radxa: https://github.com/radxa/kernel -b linux-5.10-gen-rkr3.4
+
+There we find a pretty clean `rknpu` driver, with its own of ioctls. `rknpu_ioctl.h` can even be imported by userland properly. Nice.
+We'll remember those ioctls later.
+
+Now let's string librknnrt.so. There we can find Android properties, persist.vendor.rknn.log.level, persist.vendor.rknn.dump.dir, persist.vendor.rknn.weight.mem.type (prefixed with CHWN, HWIO, OIHW, NC1HWC2, O1I1HWI2O2 which look like memory types), persist.vendor.rknn.internal.mem.type, persist.vendor.rknn.separate.weight.mem, persist.vendor.rknn.dump.quant, persist.vendor.rknn.dump.txt.tensor, 
+
+
+Let's set persist.vendor.rknn.log.level to $((0xff)) (usually log properties are either field bits or levels, 0xff handles both cases)
+
+Now let's load a model. I'll run resnet18_qat. And check logcat of rknn_server.
+
+Logcat of rknn_server gives us a lot of information, starting with this (this dump doesn't actually come from resnet18_qat but from another model):
+ RKNN    : allocated memory, virt addr: 0x70d8f6f000, dma addr: 0xffe5e000, obj addr: 0xffffff801e4a5c00, size: 6720, aligned size: 8192, fd: 10, handle: 1, flags: 0x3, gem name: 1
+ RKNN    : allocated memory, virt addr: 0x70d7c69000, dma addr: 0xff44c000, obj addr: 0xffffff801e4a2800, size: 13568, aligned size: 16384, fd: 11, handle: 2, flags: 0x5, gem name: 2
+ RKNN    : allocated memory, virt addr: 0x70d7df8000, dma addr: 0xff2ff000, obj addr: 0xffffff801e4a3400, size: 720, aligned size: 4096, fd: 12, handle: 3, flags: 0xb, gem name: 3
+ RKNN    : allocated memory, virt addr: 0x6e37820000, dma addr: 0xffd70000, obj addr: 0xffffff801e4a0800, size: 270336, aligned size: 270336, fd: 13, handle: 4, flags: 0x3, gem name: 4
+ RKNN    : allocated memory, virt addr: 0x70d7df0000, dma addr: 0xfff3e000, obj addr: 0xffffff801e4a5800, size: 8192, aligned size: 8192, fd: 14, handle: 5, flags: 0x3, gem name: 5
+ RKNN    : allocated memory, virt addr: 0x6e37800000, dma addr: 0xffe30000, obj addr: 0xffffff801e4a4000, size: 131072, aligned size: 131072, fd: 15, handle: 6, flags: 0x3, gem name: 6
+
+GEM. I know that name. I believe that's memory allocation stuff in DRM. So yeah it's still /dev/drm.
+Okay, let's strace rknn_server to find out more.
+
+First conclusion of stracing: There doesn't seem to be any other /dev opened to handle the NPU than /dev/drm/card1 (not sure why there is a render129 node then, but anyway). Cool that'll make this simpler.
+
+`strace` tries to parse the ioctls, and fail, thinking it's another DRM than rknpu, but that's fine we can do some matching. We see many calls to RKNPU_ACTION. Sadly strace won't look inside the structure for us (unless maybe we patch it?), so we'll have to guess. Looking at the list of possible actions, I don't feel there is anything really useful in there (maybe POWER_ON/POWER_OFF, and some perf stuff), so I'll ignore those calls.
+
+Then I see calls to RKNPU_MEM_CREATE. It uses rknpu_mem_create structure, which might be a bit too complicated to analyse for my taste just now, but let's remember we'll have to deal with it.
+
+After that, I finall a non-RKNPU specific call \o/. DRM_IOCTL_GEM_FLINK. Looking at drm.h, it looks like the FLINK calls allows to make a GEM object "global" by giving it a "name" (a u32). I don't understand why Rockchip does that, but that's great! That means I can have an external program dump the 6 gems, to understand what's what.
+
+Looking around, I see that we can get a GEM from its name with DRM_IOCTL_GEM_OPEN, then we can mmap it with DRM_IOCTL_RKNPU_MEM_MAP. Perfect.
+
+Okay, let's get back to the memory organisation: Why are there 6 gems? Later in the logs of rknn_server, we get a bunch of addresses to help us know what's what. I did the analysis on resnet18_qat, but that's stupidly complicated, let's move on.
+
+On that day, I also went to try to parse the various gems and their content, but it'll be better explained on a simpler model next day
+
+== 2023-02-25
+
+Let's make a toy model, with minimum instructions, to make it easier for us to debug.
+
+I wanted to start with a toy model that takes a 1D vector as input, that goes into a matrix multiplication of 1x1, and outputs a 1D vecotr as output. Then I fed it to Rockchip's SDK... And got an error. Well yes of course! Remember, I'm doing this precisely because Rockchip only knows how to handle 4D stuff!
+
+Okay, let's make it a (1,55,55,1) matrix (55x55 picture one channel). I like 55, because it'll usually popup nicely in hex dumps (PS: oh i'm stupid I meant 0x55, not 55). RKNPU is fine with it. Let's look at the logs, I get stuff like:
+RKNN    : 3    Reshape          FLOAT16  CPU    (1,55,55,1),(4)                              (1,1,1,3025)           0              0              0              90             \              0.0%/0.0%/0.0% - Up:0.0%               53.31          Reshape:/lin1/MatMul_2gemm_2conv_transpose1_2reshape
+Wait, why is it reshaping my tensors? Wait, is it doing operations on CPU? I don't want to spend time on NPU <=> CPU cooperation just yet, but what's wrong?
+
+Oh yes, in pytorch, 55x55 picture one channel is (1,1,55,55), not the other way around. Let's do it again with (1,1,55). It now looks more reasonable... Mostly:
+02-25 06:09:16.921 25228 25228 D RKNN    : ----------------------------------------------------------------------+---------------------------------
+02-25 06:09:16.921 25228 25228 D RKNN    : ID  User           Tensor        DataType  OrigShape    NativeShape   |     [Start       End)       Size
+02-25 06:09:16.921 25228 25228 D RKNN    : ----------------------------------------------------------------------+---------------------------------
+02-25 06:09:16.921 25228 25228 D RKNN    : 1   Conv           input         FLOAT16   (1,1,55,55)  (1,2,55,55,1) | 0xffdee000 0xffdef810 0x00001810
+02-25 06:09:16.921 25228 25228 D RKNN    : 2   OutputOperator 2             FLOAT16   (1,12,55,55) (1,4,55,55,8) | 0xffdc0000 0xffdd7a80 0x00017a80
+02-25 06:09:16.921 25228 25228 D RKNN    : 2   OutputOperator 2_exSecondary FLOAT16   (1,55,55,16) (1,16,55,16,8) | 0xffe092c0*0xffe24ac0 0x0001b800
+02-25 06:09:16.921 25228 25228 D RKNN    : ----------------------------------------------------------------------+---------------------------------
+
+wtf are those native shapes? I'm thinking that it could be alignment issues or stuff like that, so I try with 64x64, but it's actually identical.
+
+I've now realized my mistake, and I actually want 0x55 * 0x55 matrix, so let's do traces again with it. Okay scratch that, those traces are useless, because we don't see the difference between output and work-memory. Let's do 2 convs (1x12 then 12x1).
+
+RKNN    : allocated memory, virt addr: 0x70d7c69000, dma addr: 0xffdac000, obj addr: 0xffffff812d9e6400, size: 12736, aligned size: 16384, fd: 10, handle: 1, flags: 0x3, gem name: 1
+RKNN    : allocated memory, virt addr: 0x70d5f81000, dma addr: 0xffef0000, obj addr: 0xffffff812d9e0000, size: 23936, aligned size: 24576, fd: 11, handle: 2, flags: 0x5, gem name: 2
+RKNN    : allocated memory, virt addr: 0x70d8f70000, dma addr: 0xffeef000, obj addr: 0xffffff812d9e7800, size: 1240, aligned size: 4096, fd: 12, handle: 3, flags: 0xb, gem name: 3
+RKNN    : allocated memory, virt addr: 0x6e3773d000, dma addr: 0xffd30000, obj addr: 0xffffff812d9e2c00, size: 477568, aligned size: 479232, fd: 13, handle: 4, flags: 0x3, gem name: 4
+RKNN    : allocated memory, virt addr: 0x70d7c65000, dma addr: 0xffd2c000, obj addr: 0xffffff812d9e4000, size: 14960, aligned size: 16384, fd: 14, handle: 5, flags: 0x3, gem name: 5
+RKNN    : allocated memory, virt addr: 0x6e37829000, dma addr: 0xffcf0000, obj addr: 0xffffff812d9e3000, size: 231296, aligned size: 233472, fd: 15, handle: 6, flags: 0x3, gem name: 6
+RKNN    : ----------------------------------------------------------------------------+---------------------------------
+RKNN    : ID  User           Tensor              DataType  OrigShape    NativeShape   |     [Start       End)       Size
+RKNN    : ----------------------------------------------------------------------------+---------------------------------
+RKNN    : 1   Conv           input.1             FLOAT16   (1,1,85,85)  (1,2,85,85,1) | 0xffd2c000 0xffd2fa70 0x00003a70
+RKNN    : 2   Conv           /lin1/Conv_output_0 FLOAT16   (1,12,85,85) (1,4,85,85,8) | 0xffd33a80*0xffd6c200 0x00038780
+RKNN    : 3   OutputOperator 4                   FLOAT16   (1,1,85,85)  (1,4,85,85,8) | 0xffcf0000 0xffd28780 0x00038780
+RKNN    : 3   OutputOperator 4_exSecondary       FLOAT16   (1,85,85,8)  (1,24,85,8,8) | 0xffd30000 0xffd4fe00 0x0001fe00
+RKNN    : ----------------------------------------------------------------------------+---------------------------------
+RKNN    : --------------------------------------------+---------------------------------
+RKNN    : ID  User Tensor      DataType  OrigShape    |     [Start       End)       Size
+RKNN    : --------------------------------------------+---------------------------------
+RKNN    : 1   Conv lin1.weight FLOAT16   (12,1,1,1)   | 0xffdac000 0xffdac0c0 0x000000c0
+RKNN    : 2   Conv lin2.weight FLOAT16   (1,12,1,1)   | 0xffdac0c0 0xffdac0e0 0x00000020
+RKNN    : --------------------------------------------+---------------------------------
+RKNN    : ----------------------------------------
+
+Okay, so gem 1 contains the weight (and other stuff? size looks weird)
+Gem 2 is yet unknown (spoiler: looks like 64bits-wide instructions)
+Gem 3 is yet unknown (spoiler: looks like the list of "tasks")
+Gem 4 is the working memory (first conv writes to it)
+Gem 5 is the input
+Gem 6 is the output (not sure why I have two outputs. Other models like resnet18_qat don't)
