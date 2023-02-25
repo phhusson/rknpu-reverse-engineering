@@ -1,0 +1,38 @@
+gem1 - 0xffdac000-0xffdaf1c0
+gem4 0xffd30000-0xffda4980
+gem5 0xffd2c000-ffd2fa70
+gem6 0xffcf0000 - 0xffd28780
+
+gem 1 contains the weight (and other stuff? size looks weird)
+Gem 2 is yet unknown (spoiler: looks like 64bits-wide instructions)
+Gem 3 is yet unknown (spoiler: looks like the list of "tasks")
+Gem 4 is the working memory (first conv writes to it)
+Gem 5 is the input
+Gem 6 is the output (not sure why I have two outputs. Other models like resnet18_qat don't. Aligning to 64bits doesn't change that)
+
+
+gem 3:
+        // instrs[0] always 0
+        // instrs[1] increments non-monotenously ("1" appear three times, "0" never, and then one for each? and  then loops at &~0x1f)
+        //     on 2 layers 5x5 it goes 1 2 3 3 1 2 3 3 1 2 3 3
+        // instrs[2] == 0x1d || 0x60 || 0x18 || 0xd
+        // instrs[3] == 0x300 || 0xc00 ||
+        // instrs[4] == 0x1ffff
+        // instrs[5] == 0 || 0x100 || 0x800 || 0x200 || 
+        // instrs[6] == 0x7c | 0x1a | 0x45 | 0x6a 0x45
+        // instrs[7] == ????? deltas ranging between 0x80 to 0x300, can be negative
+        // instrs[8] == Some address in gem2
+        // instrs[9] always 0
+
+gem 2:
+physical addresses appear every now and then, helping us cut instructions.
+Looking at the instruction, they are 64bits words
+We see words like this:
+[ffef0017] lsb **0201ffd2c0001070** 
+We see phys addr ffd2c000, so we extract 16bits higher, 16 bits lower
+
+
+the phys address in gem3[x][8] appear as instructions in gem2, with always the same instruction:
+ [ff45021c] lsb 0101ff4511000010 - paddr ff451100, 0101 0010
+(with paddr varying)
+It seems to be a "jump to next task": that instruction appear in the range of the "previous" instruction in gem3 ranges

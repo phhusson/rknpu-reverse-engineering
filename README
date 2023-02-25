@@ -107,4 +107,8 @@ Gem 2 is yet unknown (spoiler: looks like 64bits-wide instructions)
 Gem 3 is yet unknown (spoiler: looks like the list of "tasks")
 Gem 4 is the working memory (first conv writes to it)
 Gem 5 is the input
-Gem 6 is the output (not sure why I have two outputs. Other models like resnet18_qat don't)
+Gem 6 is the output (not sure why I have two outputs. Other models like resnet18_qat don't. Aligning to 64bits doesn't change that)
+
+
+Structure of gem 3:
+We can see a repetition structure every 10 uint32_t words
