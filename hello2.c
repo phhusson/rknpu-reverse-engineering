@@ -27,7 +27,7 @@ void* mem_allocate(int fd, size_t size, uint64_t *dma_addr, uint64_t *obj, int f
     printf("memmap returned %d %llx\n", ret, mem_map.offset);
     void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mem_map.offset);
     if(ret < 0) exit(2);
-    printf("mmap returned %p\n", mmap);
+    printf("mmap returned %p\n", map);
 
     *dma_addr = mem_create.dma_addr;
     *obj = mem_create.obj_addr;
@@ -94,6 +94,13 @@ int main(int argc, char **argv) {
     uint64_t output_dma, output_obj;
     void *output = mem_allocate(fd, 1024*1024, &output_dma, &output_obj, 0);
 
+#if 1
+    uint64_t useless_dma, useless_obj;
+    mem_allocate(fd, 1024*1024, &useless_dma, &useless_obj, 0);
+#endif
+
+    printf("input dma is %llx, output dma is %llx, weight dma is %llx\n", input_dma, output_dma, weight_dma);
+
 	struct rknpu_action act = {
 		.flags = RKNPU_ACT_RESET,
 	};
@@ -143,7 +150,7 @@ int main(int argc, char **argv) {
 	tasks[0].op_idx = 1;
 	tasks[0].enable_mask = 0x7f; //unused?!?
 	//tasks[0].int_mask = 0x1ffff; // Ask for any interrupt at all...?
-	tasks[0].int_mask = 0x00c;
+	tasks[0].int_mask = 0x300; // 0x300 = wait for DPU to finish
 	tasks[0].int_clear = 0x1ffff;
 	tasks[0].regcfg_amount = nInstrs - 0;
 	tasks[0].regcfg_offset = 0;
@@ -151,6 +158,9 @@ int main(int argc, char **argv) {
 
 	mem_sync(fd, tasks_obj, 0, 1024*1024);
 	mem_sync(fd, instr_obj, 0, 1024*1024);
+
+	mem_sync(fd, input_obj, 0, 1024*1024);
+	mem_sync(fd, output_obj, 0, 1024*1024);
 
 	struct rknpu_submit submit = {
 		.flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK /*| RKNPU_JOB_PINGPONG*/,

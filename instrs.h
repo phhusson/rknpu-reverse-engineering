@@ -107,5 +107,5 @@ instrs[nInstrs++] = INSTR(0x1001, 0x00000000, 0x412c);
 instrs[nInstrs++] = INSTR(0x0000, 0x00000000, 0x0000);
 instrs[nInstrs++] = INSTR(0x0101, 0x00020000, 0x0014);
 instrs[nInstrs++] = INSTR(0x0041, 0x00000000, 0x0000);
-instrs[nInstrs++] = INSTR(0x0081, 0x00000001, 0xf008); // turn on just cna
+instrs[nInstrs++] = INSTR(0x0081, 1|4|8, 0xf008); // turn on just cna
 //instrs[nInstrs++] = INSTR(0x0081, 0x0000007f, 0xf008); // turn on all op_en
