@@ -26,7 +26,7 @@ void* mem_allocate(int fd, size_t size, uint64_t *dma_addr, uint64_t *obj, int f
     ret = ioctl(fd, DRM_IOCTL_RKNPU_MEM_MAP, &mem_map);
     printf("memmap returned %d %llx\n", ret, mem_map.offset);
     void *map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mem_map.offset);
-    if(ret < 0) exit(2);
+    if(map == -1) exit(2);
     printf("mmap returned %p\n", map);
 
     *dma_addr = mem_create.dma_addr;
@@ -80,31 +80,30 @@ int main(int argc, char **argv) {
 
     uint64_t instr_dma, instr_obj;
     uint64_t *instrs = mem_allocate(fd, 1024*1024, &instr_dma, &instr_obj, 0);
+    printf("%s %d\n", __FILE__, __LINE__);
 
 	// Why is this a GEM?!?
     uint64_t tasks_dma, tasks_obj;
     struct rknpu_task *tasks = mem_allocate(fd, 1024*1024, &tasks_dma, &tasks_obj, RKNPU_MEM_KERNEL_MAPPING);
+    printf("%s %d\n", __FILE__, __LINE__);
 
     uint64_t input_dma, input_obj;
     void *input = mem_allocate(fd, 1024*1024, &input_dma, &input_obj, 0);
+    printf("%s %d\n", __FILE__, __LINE__);
 
     uint64_t weight_dma, weight_obj;
     void *weight = mem_allocate(fd, 1024*1024, &weight_dma, &weight_obj, 0);
+    printf("%s %d\n", __FILE__, __LINE__);
 
     uint64_t output_dma, output_obj;
     void *output = mem_allocate(fd, 1024*1024, &output_dma, &output_obj, 0);
-
-#if 1
-    uint64_t useless_dma, useless_obj;
-    mem_allocate(fd, 1024*1024, &useless_dma, &useless_obj, 0);
-#endif
-
-    printf("input dma is %llx, output dma is %llx, weight dma is %llx\n", input_dma, output_dma, weight_dma);
+    printf("%s %d\n", __FILE__, __LINE__);
 
 	struct rknpu_action act = {
 		.flags = RKNPU_ACT_RESET,
 	};
 	ioctl(fd, DRM_IOCTL_RKNPU_ACTION, &act);
+    printf("%s %d\n", __FILE__, __LINE__);
 
 #define IRQ_CNA_FEATURE_GROUP0	(1 << 0)
 #define IRQ_CNA_FEATURE_GROUP1	(1 << 1)
@@ -145,22 +144,24 @@ int main(int argc, char **argv) {
 
 #include "instrs.h"
 #endif
+    printf("%s %d\n", __FILE__, __LINE__);
 
 	tasks[0].flags  = 0;
 	tasks[0].op_idx = 1;
 	tasks[0].enable_mask = 0x7f; //unused?!?
 	//tasks[0].int_mask = 0x1ffff; // Ask for any interrupt at all...?
-	tasks[0].int_mask = 0x300; // 0x300 = wait for DPU to finish
+	tasks[0].int_mask = 0xf; // Ask for any interrupt at all...?
+	//tasks[0].int_mask = 0x30c;
 	tasks[0].int_clear = 0x1ffff;
 	tasks[0].regcfg_amount = nInstrs - 0;
 	tasks[0].regcfg_offset = 0;
 	tasks[0].regcmd_addr = instr_dma;
+    printf("%s %d\n", __FILE__, __LINE__);
 
 	mem_sync(fd, tasks_obj, 0, 1024*1024);
+    printf("%s %d\n", __FILE__, __LINE__);
 	mem_sync(fd, instr_obj, 0, 1024*1024);
-
-	mem_sync(fd, input_obj, 0, 1024*1024);
-	mem_sync(fd, output_obj, 0, 1024*1024);
+    printf("%s %d\n", __FILE__, __LINE__);
 
 	struct rknpu_submit submit = {
 		.flags = RKNPU_JOB_PC | RKNPU_JOB_BLOCK /*| RKNPU_JOB_PINGPONG*/,
@@ -184,6 +185,7 @@ int main(int argc, char **argv) {
 		},
 	};
 
+    printf("%s %d\n", __FILE__, __LINE__);
 	ret = ioctl(fd, DRM_IOCTL_RKNPU_SUBMIT, &submit);
 	printf("Submit returned %d\n", ret);
 
